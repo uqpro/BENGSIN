@@ -38,9 +38,9 @@
     <div id="view-map" class="w-full h-full relative">
       <div id="map"></div>
       
-      <!-- Indicator Loading POI -->
-      <div id="poi-loader" class="hidden absolute top-3 right-3 bg-white/90 backdrop-blur-sm px-3 py-1.5 rounded-full shadow-md text-xs text-gray-700 z-[1000] flex items-center gap-2 border">
-        <i class="fa-solid fa-spinner fa-spin text-red-600"></i> Memuat POI...
+      <!-- Indicator Loading OSM -->
+      <div id="osm-loader" class="hidden absolute top-3 right-3 bg-white/90 backdrop-blur-sm px-3 py-1.5 rounded-full shadow-md text-xs text-gray-700 z-[1000] flex items-center gap-2 border">
+        <i class="fa-solid fa-spinner fa-spin text-red-600"></i> Memuat POI OSM...
       </div>
     </div>
 
@@ -179,12 +179,11 @@
 
   <script>
     const GAS_WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbzgKU5dvNVXljApdL6FVGjv7jSMMx-FTYjs2V6-aeBQgJG7hyZZnA4HDTMClVEpgK5yXw/exec';
-    const GEOAPIFY_API_KEY = ''; // Opsional: Isi jika punya API Key Geoapify
 
     let map, pickerMap, userMarker, pickerMarker;
-    let poiDbGroup, poiExternalGroup; 
-    let loadedPoiIds = new Set();
-    let poiDebounceTimer = null;
+    let poiDbGroup, poiOsmGroup; 
+    let loadedOsmIds = new Set();
+    let osmDebounceTimer = null;
     let currentUser = JSON.parse(localStorage.getItem('ada_bengsin_user')) || null;
 
     document.addEventListener('DOMContentLoaded', () => {
@@ -200,18 +199,17 @@
     }
 
     function initMap() {
+      // Default Samarinda
       const defaultLat = -0.502181;
       const defaultLng = 117.153801;
 
       map = L.map('map').setView([defaultLat, defaultLng], 13);
-
-      // Basemap CartoDB Positron
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-        attribution: '© OpenStreetMap, © CARTO'
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap'
       }).addTo(map);
 
       poiDbGroup = L.layerGroup().addTo(map);
-      poiExternalGroup = L.layerGroup().addTo(map);
+      poiOsmGroup = L.layerGroup().addTo(map);
 
       if (navigator.geolocation) {
         navigator.geolocation.getCurrentPosition(pos => {
@@ -232,14 +230,13 @@
       loadLocationsFromDb();
 
       map.on('moveend', () => {
-        clearTimeout(poiDebounceTimer);
-        poiDebounceTimer = setTimeout(fetchExternalPoiInView, 600);
+        clearTimeout(osmDebounceTimer);
+        osmDebounceTimer = setTimeout(fetchOsmPoiInView, 600);
       });
 
-      fetchExternalPoiInView();
+      fetchOsmPoiInView();
     }
 
-    // 1. Ambil POI Manual dari Database Google Sheet
     function loadLocationsFromDb() {
       fetch(`${GAS_WEB_APP_URL}?action=getLocations`, { method: 'GET', redirect: 'follow' })
         .then(res => res.json())
@@ -290,12 +287,11 @@
         .catch(err => console.error('Gagal memuat POI DB:', err));
     }
 
-    // 2. Ambil POI Live dari Overpass API dengan Multi-Mirror Anti CORS
-    function fetchExternalPoiInView() {
+    function fetchOsmPoiInView() {
       if (map.getZoom() < 12) return;
 
-      const loader = document.getElementById('poi-loader');
-      if (loader) loader.classList.remove('hidden');
+      const loader = document.getElementById('osm-loader');
+      loader.classList.remove('hidden');
 
       const bounds = map.getBounds();
       const s = bounds.getSouth().toFixed(4);
@@ -303,121 +299,73 @@
       const n = bounds.getNorth().toFixed(4);
       const e = bounds.getEast().toFixed(4);
 
-      const query = `[out:json][timeout:15];(node["amenity"="fuel"](${s},${w},${n},${e});node["amenity"="charging_station"](${s},${w},${n},${e}););out body;`;
-
-      const mirrors = [
-        "https://overpass.kumi.systems/api/interpreter",
-        "https://overpass.openstreetmap.fr/api/interpreter",
-        "https://overpass-api.de/api/interpreter"
-      ];
-
-      function tryFetchMirror(index) {
-        if (index >= mirrors.length) {
-          if (loader) loader.classList.add('hidden');
-          console.log('Semua mirror Overpass gagal. Mencoba sumber sekunder...');
-          if (typeof GEOAPIFY_API_KEY !== 'undefined' && GEOAPIFY_API_KEY) {
-            fetchGeoapifyPoi(s, w, n, e);
-          }
-          return;
-        }
-
-        const url = mirrors[index] + "?data=" + encodeURIComponent(query);
-
-        fetch(url)
-          .then(res => {
-            if (!res.ok) throw new Error('HTTP status ' + res.status);
-            return res.json();
-          })
-          .then(data => {
-            if (loader) loader.classList.add('hidden');
-            if (!data || !data.elements) return;
-
-            data.elements.forEach(el => {
-              if (loadedPoiIds.has('osm-' + el.id)) return;
-              loadedPoiIds.add('osm-' + el.id);
-
-              let rawName = (el.tags && el.tags.name) ? el.tags.name : '';
-              let isCharging = el.tags && el.tags.amenity === 'charging_station';
-
-              let kategori = 'SPBU';
-              let color = 'bg-red-600';
-              let iconClass = 'fa-gas-pump';
-
-              if (isCharging) {
-                kategori = 'SPKLU';
-                color = 'bg-blue-600';
-                iconClass = 'fa-charging-station';
-                if (!rawName) rawName = 'SPKLU Charging Station';
-              } else if (rawName.toLowerCase().includes('pertashop')) {
-                kategori = 'Pertashop';
-                color = 'bg-green-600';
-              } else {
-                if (!rawName) rawName = 'SPBU / Penjual BBM';
-              }
-
-              renderExternalMarker(el.lat, el.lon, rawName, kategori, color, iconClass, 'OpenStreetMap');
-            });
-          })
-          .catch(err => {
-            console.warn(`Mirror ${mirrors[index]} gagal/CORS blocked, mengalihkan...`);
-            tryFetchMirror(index + 1);
-          });
-      }
-
-      tryFetchMirror(0);
-    }
-
-    function fetchGeoapifyPoi(s, w, n, e) {
-      const geoUrl = `https://api.geoapify.com/v2/places?categories=service.fuel,service.vehicle.charging_station&filter=rect:${w},${n},${e},${s}&limit=50&apiKey=${GEOAPIFY_API_KEY}`;
-      
-      fetch(geoUrl)
-        .then(res => res.json())
-        .then(data => {
-          if (!data || !data.features) return;
-
-          data.features.forEach(f => {
-            const props = f.properties;
-            const id = 'geo-' + props.place_id;
-            
-            if (loadedPoiIds.has(id)) return;
-            loadedPoiIds.add(id);
-
-            const lat = props.lat;
-            const lon = props.lon;
-            let name = props.name || 'SPBU / Tempat Isi BBM';
-            let isCharging = props.categories.includes('service.vehicle.charging_station');
-
-            let kategori = isCharging ? 'SPKLU' : (name.toLowerCase().includes('pertashop') ? 'Pertashop' : 'SPBU');
-            let color = isCharging ? 'bg-blue-600' : (kategori === 'Pertashop' ? 'bg-green-600' : 'bg-red-600');
-            let iconClass = isCharging ? 'fa-charging-station' : 'fa-gas-pump';
-
-            renderExternalMarker(lat, lon, name, kategori, color, iconClass, 'Geoapify Places');
-          });
-        })
-        .catch(console.error);
-    }
-
-    function renderExternalMarker(lat, lon, name, kategori, color, iconClass, sourceName) {
-      const icon = L.divIcon({
-        className: 'custom-ext-icon',
-        html: `<div class="${color} text-white rounded-full p-2 w-8 h-8 flex items-center justify-center shadow-md border border-white"><i class="fa-solid ${iconClass} text-xs"></i></div>`
-      });
-
-      const popupContent = `
-        <div class="p-1">
-          <span class="text-[10px] font-bold px-2 py-0.5 rounded text-white ${color}">${kategori} (${sourceName})</span>
-          <h4 class="font-bold text-sm mt-1 text-gray-800">${name}</h4>
-          <p class="text-xs text-gray-500 mt-1">Sumber: ${sourceName}</p>
-          <a href="https://www.google.com/maps/dir/?api=1&destination=${lat},${lon}" target="_blank" 
-             class="mt-2 block text-center bg-blue-600 text-white text-xs py-1 px-2 rounded font-semibold hover:bg-blue-700">
-            <i class="fa-solid fa-route"></i> Navigasi Rute
-          </a>
-        </div>
+      const query = `
+        [out:json][timeout:15];
+        (
+          node["amenity"="fuel"](${s},${w},${n},${e});
+          node["amenity"="charging_station"](${s},${w},${n},${e});
+        );
+        out body;
       `;
 
-      L.marker([lat, lon], { icon: icon })
-        .bindPopup(popupContent)
-        .addTo(poiExternalGroup);
+      const url = "https://overpass-api.de/api/interpreter?data=" + encodeURIComponent(query);
+
+      fetch(url)
+        .then(res => res.json())
+        .then(data => {
+          loader.classList.add('hidden');
+
+          if (!data || !data.elements) return;
+
+          data.elements.forEach(el => {
+            if (loadedOsmIds.has(el.id)) return;
+            loadedOsmIds.add(el.id);
+
+            let rawName = (el.tags && el.tags.name) ? el.tags.name : '';
+            let isCharging = el.tags && el.tags.amenity === 'charging_station';
+
+            let kategori = 'SPBU';
+            let color = 'bg-red-600';
+            let iconClass = 'fa-gas-pump';
+
+            if (isCharging) {
+              kategori = 'SPKLU';
+              color = 'bg-blue-600';
+              iconClass = 'fa-charging-station';
+              if (!rawName) rawName = 'SPKLU Charging Station';
+            } else if (rawName.toLowerCase().includes('pertashop')) {
+              kategori = 'Pertashop';
+              color = 'bg-green-600';
+            } else {
+              if (!rawName) rawName = 'SPBU / Penjual BBM';
+            }
+
+            const icon = L.divIcon({
+              className: 'custom-osm-icon',
+              html: `<div class="${color} text-white rounded-full p-2 w-8 h-8 flex items-center justify-center shadow-md border border-white"><i class="fa-solid ${iconClass} text-xs"></i></div>`
+            });
+
+            const popupContent = `
+              <div class="p-1">
+                <span class="text-[10px] font-bold px-2 py-0.5 rounded text-white ${color}">${kategori} (OSM)</span>
+                <h4 class="font-bold text-sm mt-1 text-gray-800">${rawName}</h4>
+                <p class="text-xs text-gray-500 mt-1">Sumber: OpenStreetMap Data</p>
+                <a href="https://www.google.com/maps/dir/?api=1&destination=${el.lat},${el.lon}" target="_blank" 
+                   class="mt-2 block text-center bg-blue-600 text-white text-xs py-1 px-2 rounded font-semibold hover:bg-blue-700">
+                  <i class="fa-solid fa-route"></i> Navigasi Rute
+                </a>
+              </div>
+            `;
+
+            L.marker([el.lat, el.lon], { icon: icon })
+              .bindPopup(popupContent)
+              .addTo(poiOsmGroup);
+          });
+        })
+        .catch(err => {
+          loader.classList.add('hidden');
+          console.log('Gagal menarik POI OSM:', err);
+        });
     }
 
     function initPickerMap() {
@@ -428,7 +376,7 @@
 
       const center = map.getCenter();
       pickerMap = L.map('picker-map').setView([center.lat, center.lng], 14);
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png').addTo(pickerMap);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(pickerMap);
 
       pickerMarker = L.marker([center.lat, center.lng], { draggable: true }).addTo(pickerMap);
 
@@ -516,6 +464,7 @@
       }).then(res => res.json());
     }
 
+    // VALIDASI FORM REGISTRASI FRONTEND
     document.getElementById('form-register').addEventListener('submit', e => {
       e.preventDefault();
 
@@ -524,17 +473,20 @@
       const namaInput = document.getElementById('reg-nama').value.trim();
       const waInput = document.getElementById('reg-wa').value.trim();
 
+      // Validasi Format Username
       const usernameRegex = /^[a-zA-Z0-9_]{4,20}$/;
       if (!usernameRegex.test(usernameInput)) {
         alert('Username harus 4-20 karakter dan hanya boleh huruf, angka, atau underscore (_). Tanpa spasi!');
         return;
       }
 
+      // Validasi Panjang Password
       if (passwordInput.length < 6) {
         alert('Password minimal harus 6 karakter!');
         return;
       }
 
+      // Validasi No. WhatsApp
       const waRegex = /^[0-9]{10,15}$/;
       if (!waRegex.test(waInput)) {
         alert('Nomor WhatsApp tidak valid! Masukkan 10-15 digit angka.');
