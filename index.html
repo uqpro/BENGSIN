@@ -38,7 +38,7 @@
     <div id="view-map" class="w-full h-full relative">
       <div id="map"></div>
       
-      <!-- Indicator Loading OSM / Geoapify -->
+      <!-- Indicator Loading POI -->
       <div id="poi-loader" class="hidden absolute top-3 right-3 bg-white/90 backdrop-blur-sm px-3 py-1.5 rounded-full shadow-md text-xs text-gray-700 z-[1000] flex items-center gap-2 border">
         <i class="fa-solid fa-spinner fa-spin text-red-600"></i> Memuat POI...
       </div>
@@ -179,9 +179,7 @@
 
   <script>
     const GAS_WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbzgKU5dvNVXljApdL6FVGjv7jSMMx-FTYjs2V6-aeBQgJG7hyZZnA4HDTMClVEpgK5yXw/exec';
-
-    // OPSIONAL: Masukkan API Key Geoapify jika ingin menambah pencarian dari Geoapify Places
-    const GEOAPIFY_API_KEY = ''; // Contoh: 'YOUR_GEOAPIFY_API_KEY'
+    const GEOAPIFY_API_KEY = ''; // Opsional: Isi jika punya API Key Geoapify
 
     let map, pickerMap, userMarker, pickerMarker;
     let poiDbGroup, poiExternalGroup; 
@@ -207,7 +205,7 @@
 
       map = L.map('map').setView([defaultLat, defaultLng], 13);
 
-      // Menggunakan CartoDB Positron Basemap untuk tampilan peta yang lebih bersih & profesional
+      // Basemap CartoDB Positron
       L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
         attribution: '© OpenStreetMap, © CARTO'
       }).addTo(map);
@@ -241,7 +239,7 @@
       fetchExternalPoiInView();
     }
 
-    // 1. Load POI Manual dari Database Google Sheet
+    // 1. Ambil POI Manual dari Database Google Sheet
     function loadLocationsFromDb() {
       fetch(`${GAS_WEB_APP_URL}?action=getLocations`, { method: 'GET', redirect: 'follow' })
         .then(res => res.json())
@@ -292,12 +290,12 @@
         .catch(err => console.error('Gagal memuat POI DB:', err));
     }
 
-    // 2. Load POI Otomatis dari OpenStreetMap / Geoapify berdasarkan Bounding Box Peta
+    // 2. Ambil POI Live dari Overpass API dengan Multi-Mirror Anti CORS
     function fetchExternalPoiInView() {
       if (map.getZoom() < 12) return;
 
       const loader = document.getElementById('poi-loader');
-      loader.classList.remove('hidden');
+      if (loader) loader.classList.remove('hidden');
 
       const bounds = map.getBounds();
       const s = bounds.getSouth().toFixed(4);
@@ -305,61 +303,70 @@
       const n = bounds.getNorth().toFixed(4);
       const e = bounds.getEast().toFixed(4);
 
-      // OPSI A: Menggunakan Overpass API (OpenStreetMap)
-      const query = `
-        [out:json][timeout:15];
-        (
-          node["amenity"="fuel"](${s},${w},${n},${e});
-          node["amenity"="charging_station"](${s},${w},${n},${e});
-        );
-        out body;
-      `;
-      const url = "https://overpass-api.de/api/interpreter?data=" + encodeURIComponent(query);
+      const query = `[out:json][timeout:15];(node["amenity"="fuel"](${s},${w},${n},${e});node["amenity"="charging_station"](${s},${w},${n},${e}););out body;`;
 
-      fetch(url)
-        .then(res => res.json())
-        .then(data => {
-          loader.classList.add('hidden');
-          if (!data || !data.elements) return;
+      const mirrors = [
+        "https://overpass.kumi.systems/api/interpreter",
+        "https://overpass.openstreetmap.fr/api/interpreter",
+        "https://overpass-api.de/api/interpreter"
+      ];
 
-          data.elements.forEach(el => {
-            if (loadedPoiIds.has('osm-' + el.id)) return;
-            loadedPoiIds.add('osm-' + el.id);
-
-            let rawName = (el.tags && el.tags.name) ? el.tags.name : '';
-            let isCharging = el.tags && el.tags.amenity === 'charging_station';
-
-            let kategori = 'SPBU';
-            let color = 'bg-red-600';
-            let iconClass = 'fa-gas-pump';
-
-            if (isCharging) {
-              kategori = 'SPKLU';
-              color = 'bg-blue-600';
-              iconClass = 'fa-charging-station';
-              if (!rawName) rawName = 'SPKLU Charging Station';
-            } else if (rawName.toLowerCase().includes('pertashop')) {
-              kategori = 'Pertashop';
-              color = 'bg-green-600';
-            } else {
-              if (!rawName) rawName = 'SPBU / Penjual BBM';
-            }
-
-            renderExternalMarker(el.lat, el.lon, rawName, kategori, color, iconClass, 'OpenStreetMap');
-          });
-        })
-        .catch(err => {
-          loader.classList.add('hidden');
-          console.log('Gagal menarik POI OSM, mencoba sumber sekunder...', err);
-
-          // OPSI B: Backup dari Geoapify jika API Key diisi
-          if (GEOAPIFY_API_KEY) {
+      function tryFetchMirror(index) {
+        if (index >= mirrors.length) {
+          if (loader) loader.classList.add('hidden');
+          console.log('Semua mirror Overpass gagal. Mencoba sumber sekunder...');
+          if (typeof GEOAPIFY_API_KEY !== 'undefined' && GEOAPIFY_API_KEY) {
             fetchGeoapifyPoi(s, w, n, e);
           }
-        });
+          return;
+        }
+
+        const url = mirrors[index] + "?data=" + encodeURIComponent(query);
+
+        fetch(url)
+          .then(res => {
+            if (!res.ok) throw new Error('HTTP status ' + res.status);
+            return res.json();
+          })
+          .then(data => {
+            if (loader) loader.classList.add('hidden');
+            if (!data || !data.elements) return;
+
+            data.elements.forEach(el => {
+              if (loadedPoiIds.has('osm-' + el.id)) return;
+              loadedPoiIds.add('osm-' + el.id);
+
+              let rawName = (el.tags && el.tags.name) ? el.tags.name : '';
+              let isCharging = el.tags && el.tags.amenity === 'charging_station';
+
+              let kategori = 'SPBU';
+              let color = 'bg-red-600';
+              let iconClass = 'fa-gas-pump';
+
+              if (isCharging) {
+                kategori = 'SPKLU';
+                color = 'bg-blue-600';
+                iconClass = 'fa-charging-station';
+                if (!rawName) rawName = 'SPKLU Charging Station';
+              } else if (rawName.toLowerCase().includes('pertashop')) {
+                kategori = 'Pertashop';
+                color = 'bg-green-600';
+              } else {
+                if (!rawName) rawName = 'SPBU / Penjual BBM';
+              }
+
+              renderExternalMarker(el.lat, el.lon, rawName, kategori, color, iconClass, 'OpenStreetMap');
+            });
+          })
+          .catch(err => {
+            console.warn(`Mirror ${mirrors[index]} gagal/CORS blocked, mengalihkan...`);
+            tryFetchMirror(index + 1);
+          });
+      }
+
+      tryFetchMirror(0);
     }
 
-    // Fungsi tambahan pencarian dari Geoapify
     function fetchGeoapifyPoi(s, w, n, e) {
       const geoUrl = `https://api.geoapify.com/v2/places?categories=service.fuel,service.vehicle.charging_station&filter=rect:${w},${n},${e},${s}&limit=50&apiKey=${GEOAPIFY_API_KEY}`;
       
@@ -390,7 +397,6 @@
         .catch(console.error);
     }
 
-    // Function Helper Render Marker Eksternal
     function renderExternalMarker(lat, lon, name, kategori, color, iconClass, sourceName) {
       const icon = L.divIcon({
         className: 'custom-ext-icon',
