@@ -82,7 +82,7 @@
 
         <div>
           <label class="block text-xs font-semibold text-gray-600">Jenis BBM / Power Tersedia</label>
-          <input type="text" id="add-bbm" placeholder="Pertalite, Pertamax, Solar, EV Charging" class="w-full p-2 border rounded text-sm">
+          <input type="text" id="add-bbm" placeholder="Pertalite, Pertamax, Solar, EV Fast Charging" class="w-full p-2 border rounded text-sm">
         </div>
 
         <div>
@@ -139,7 +139,7 @@
             </div>
             <div>
               <label class="block text-xs font-semibold text-gray-600">Username</label>
-              <input type="text" id="reg-username" required class="w-full p-2 border rounded text-sm">
+              <input type="text" id="reg-username" required placeholder="Huruf/angka/underscore (min. 4 kar)" class="w-full p-2 border rounded text-sm">
             </div>
             <div>
               <label class="block text-xs font-semibold text-gray-600">No. WhatsApp</label>
@@ -147,7 +147,7 @@
             </div>
             <div>
               <label class="block text-xs font-semibold text-gray-600">Password</label>
-              <input type="password" id="reg-password" required class="w-full p-2 border rounded text-sm">
+              <input type="password" id="reg-password" required placeholder="Minimal 6 karakter" class="w-full p-2 border rounded text-sm">
             </div>
             <button type="submit" class="w-full bg-green-600 text-white py-2 rounded-lg font-semibold hover:bg-green-700">
               Daftar Akun
@@ -182,7 +182,7 @@
 
     let map, pickerMap, userMarker, pickerMarker;
     let poiDbGroup, poiOsmGroup; 
-    let loadedOsmIds = new Set(); // Mencegah pemuatan berulang marker OSM yang sama
+    let loadedOsmIds = new Set();
     let osmDebounceTimer = null;
     let currentUser = JSON.parse(localStorage.getItem('ada_bengsin_user')) || null;
 
@@ -199,7 +199,7 @@
     }
 
     function initMap() {
-      // Default Samarinda Coords
+      // Default Samarinda
       const defaultLat = -0.502181;
       const defaultLng = 117.153801;
 
@@ -208,7 +208,6 @@
         attribution: '© OpenStreetMap'
       }).addTo(map);
 
-      // Layer terpisah untuk Data DB dan Data Live OSM
       poiDbGroup = L.layerGroup().addTo(map);
       poiOsmGroup = L.layerGroup().addTo(map);
 
@@ -228,20 +227,16 @@
         });
       }
 
-      // Load data manual dari Google Sheet
       loadLocationsFromDb();
 
-      // Event Listener saat peta digeser/zoom -> ambil POI OSM
       map.on('moveend', () => {
         clearTimeout(osmDebounceTimer);
         osmDebounceTimer = setTimeout(fetchOsmPoiInView, 600);
       });
 
-      // Panggilan pertama untuk OSM POI
       fetchOsmPoiInView();
     }
 
-    // 1. Ambil POI dari Google Sheets DB
     function loadLocationsFromDb() {
       fetch(`${GAS_WEB_APP_URL}?action=getLocations`, { method: 'GET', redirect: 'follow' })
         .then(res => res.json())
@@ -292,9 +287,7 @@
         .catch(err => console.error('Gagal memuat POI DB:', err));
     }
 
-    // 2. Ambil POI Live dari OpenStreetMap Overpass API berdasarkan Viewport Screen
     function fetchOsmPoiInView() {
-      // Batasi pemanggilan jika zoom terlalu jauh (luas) agar ringan
       if (map.getZoom() < 12) return;
 
       const loader = document.getElementById('osm-loader');
@@ -325,7 +318,7 @@
           if (!data || !data.elements) return;
 
           data.elements.forEach(el => {
-            if (loadedOsmIds.has(el.id)) return; // Lewati jika ID sudah pernah digambar
+            if (loadedOsmIds.has(el.id)) return;
             loadedOsmIds.add(el.id);
 
             let rawName = (el.tags && el.tags.name) ? el.tags.name : '';
@@ -463,7 +456,6 @@
       switchTab('map');
     }
 
-    // Helper POST ke Google Apps Script (Anti CORS Block)
     function sendGasPost(payload) {
       return fetch(GAS_WEB_APP_URL, {
         method: 'POST',
@@ -472,15 +464,42 @@
       }).then(res => res.json());
     }
 
+    // VALIDASI FORM REGISTRASI FRONTEND
     document.getElementById('form-register').addEventListener('submit', e => {
       e.preventDefault();
+
+      const usernameInput = document.getElementById('reg-username').value.trim();
+      const passwordInput = document.getElementById('reg-password').value;
+      const namaInput = document.getElementById('reg-nama').value.trim();
+      const waInput = document.getElementById('reg-wa').value.trim();
+
+      // Validasi Format Username
+      const usernameRegex = /^[a-zA-Z0-9_]{4,20}$/;
+      if (!usernameRegex.test(usernameInput)) {
+        alert('Username harus 4-20 karakter dan hanya boleh huruf, angka, atau underscore (_). Tanpa spasi!');
+        return;
+      }
+
+      // Validasi Panjang Password
+      if (passwordInput.length < 6) {
+        alert('Password minimal harus 6 karakter!');
+        return;
+      }
+
+      // Validasi No. WhatsApp
+      const waRegex = /^[0-9]{10,15}$/;
+      if (!waRegex.test(waInput)) {
+        alert('Nomor WhatsApp tidak valid! Masukkan 10-15 digit angka.');
+        return;
+      }
+
       const payload = {
         action: 'register',
         data: {
-          nama_lengkap: document.getElementById('reg-nama').value,
-          username: document.getElementById('reg-username').value,
-          no_whatsapp: document.getElementById('reg-wa').value,
-          password: document.getElementById('reg-password').value
+          nama_lengkap: namaInput,
+          username: usernameInput.toLowerCase(),
+          no_whatsapp: waInput,
+          password: passwordInput
         }
       };
 
@@ -497,7 +516,7 @@
       const payload = {
         action: 'login',
         data: {
-          username: document.getElementById('login-username').value,
+          username: document.getElementById('login-username').value.trim().toLowerCase(),
           password: document.getElementById('login-password').value
         }
       };
