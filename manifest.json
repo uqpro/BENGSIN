@@ -1,26 +1,21 @@
 {
-  "name": "Masjid Finder Indonesia",
-  "short_name": "Masjid Finder",
-  "description": "Aplikasi untuk menemukan masjid, mushola, langgar dan surau di Indonesia.",
+  "name": "ADA BENGSIN",
+  "short_name": "ADA BENGSIN",
+  "description": "Peta Pencarian SPBU, Pertashop, dan Eceran BBM Terdekat",
   "start_url": "./index.html",
   "display": "standalone",
-  "background_color": "#f1f5f9",
-  "theme_color": "#0f766e",
-  "orientation": "portrait",
-  "lang": "id-ID",
-  "scope": "./",
+  "background_color": "#ffffff",
+  "theme_color": "#dc2626",
   "icons": [
     {
-      "src": "https://upload.wikimedia.org/wikipedia/commons/thumb/2/2c/Mosque_icon.svg/192px-Mosque_icon.svg.png",
+      "src": "https://cdn-icons-png.flaticon.com/512/2991/2991231.png",
       "sizes": "192x192",
-      "type": "image/png",
-      "purpose": "any maskable"
+      "type": "image/png"
     },
     {
-      "src": "https://upload.wikimedia.org/wikipedia/commons/thumb/2/2c/Mosque_icon.svg/512px-Mosque_icon.svg.png",
+      "src": "https://cdn-icons-png.flaticon.com/512/2991/2991231.png",
       "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "any maskable"
+      "type": "image/png"
     }
   ]
 }
