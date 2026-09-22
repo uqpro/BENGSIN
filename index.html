@@ -35,8 +35,13 @@
   <!-- Main Content Area -->
   <main class="flex-1 relative">
     <!-- View Peta -->
-    <div id="view-map" class="w-full h-full">
+    <div id="view-map" class="w-full h-full relative">
       <div id="map"></div>
+      
+      <!-- Indicator Loading OSM -->
+      <div id="osm-loader" class="hidden absolute top-3 right-3 bg-white/90 backdrop-blur-sm px-3 py-1.5 rounded-full shadow-md text-xs text-gray-700 z-[1000] flex items-center gap-2 border">
+        <i class="fa-solid fa-spinner fa-spin text-red-600"></i> Memuat POI OSM...
+      </div>
     </div>
 
     <!-- View Form Tambah Lokasi -->
@@ -71,12 +76,13 @@
             <option value="SPBU">SPBU Official</option>
             <option value="Pertashop">Pertashop</option>
             <option value="Eceran">Penjual Eceran</option>
+            <option value="SPKLU">SPKLU (Charging Station)</option>
           </select>
         </div>
 
         <div>
-          <label class="block text-xs font-semibold text-gray-600">Jenis BBM Tersedia (pisahkan koma)</label>
-          <input type="text" id="add-bbm" placeholder="Pertalite, Pertamax, Solar" class="w-full p-2 border rounded text-sm">
+          <label class="block text-xs font-semibold text-gray-600">Jenis BBM / Power Tersedia</label>
+          <input type="text" id="add-bbm" placeholder="Pertalite, Pertamax, Solar, EV Charging" class="w-full p-2 border rounded text-sm">
         </div>
 
         <div>
@@ -172,264 +178,369 @@
   </nav>
 
   <script>
-  const GAS_WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbzgKU5dvNVXljApdL6FVGjv7jSMMx-FTYjs2V6-aeBQgJG7hyZZnA4HDTMClVEpgK5yXw/exec';
+    const GAS_WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbzgKU5dvNVXljApdL6FVGjv7jSMMx-FTYjs2V6-aeBQgJG7hyZZnA4HDTMClVEpgK5yXw/exec';
 
-  let map, pickerMap, userMarker, pickerMarker;
-  let poiMarkersGroup; // Layer group untuk mengelola marker POI
-  let currentUser = JSON.parse(localStorage.getItem('ada_bengsin_user')) || null;
+    let map, pickerMap, userMarker, pickerMarker;
+    let poiDbGroup, poiOsmGroup; 
+    let loadedOsmIds = new Set(); // Mencegah pemuatan berulang marker OSM yang sama
+    let osmDebounceTimer = null;
+    let currentUser = JSON.parse(localStorage.getItem('ada_bengsin_user')) || null;
 
-  document.addEventListener('DOMContentLoaded', () => {
-    initMap();
-    updateUserUI();
-    registerSW();
-  });
+    document.addEventListener('DOMContentLoaded', () => {
+      initMap();
+      updateUserUI();
+      registerSW();
+    });
 
-  function registerSW() {
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('sw.js').catch(console.error);
-    }
-  }
-
-  function initMap() {
-    const defaultLat = -0.502181;
-    const defaultLng = 117.153801;
-
-    map = L.map('map').setView([defaultLat, defaultLng], 13);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '© OpenStreetMap'
-    }).addTo(map);
-
-    poiMarkersGroup = L.layerGroup().addTo(map);
-
-    if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(pos => {
-        const lat = pos.coords.latitude;
-        const lng = pos.coords.longitude;
-        map.setView([lat, lng], 14);
-        
-        if (userMarker) map.removeLayer(userMarker);
-        userMarker = L.marker([lat, lng], {
-          icon: L.divIcon({
-            className: 'custom-user-icon',
-            html: `<div class="bg-blue-600 text-white rounded-full p-2 w-8 h-8 flex items-center justify-center shadow-lg border-2 border-white"><i class="fa-solid fa-location-crosshairs text-sm"></i></div>`
-          })
-        }).addTo(map).bindPopup('<b>Lokasi Anda Saat Ini</b>');
-      });
+    function registerSW() {
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('sw.js').catch(console.error);
+      }
     }
 
-    loadLocations();
-  }
+    function initMap() {
+      // Default Samarinda Coords
+      const defaultLat = -0.502181;
+      const defaultLng = 117.153801;
 
-  function loadLocations() {
-    fetch(`${GAS_WEB_APP_URL}?action=getLocations`, { method: 'GET', redirect: 'follow' })
-      .then(res => res.json())
-      .then(res => {
-        if (res.status === 'success' && Array.isArray(res.data)) {
-          poiMarkersGroup.clearLayers(); // Bersihkan marker lama
+      map = L.map('map').setView([defaultLat, defaultLng], 13);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap'
+      }).addTo(map);
+
+      // Layer terpisah untuk Data DB dan Data Live OSM
+      poiDbGroup = L.layerGroup().addTo(map);
+      poiOsmGroup = L.layerGroup().addTo(map);
+
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(pos => {
+          const lat = pos.coords.latitude;
+          const lng = pos.coords.longitude;
+          map.setView([lat, lng], 14);
           
-          res.data.forEach(loc => {
-            const lat = parseFloat(loc.latitude);
-            const lng = parseFloat(loc.longitude);
+          if (userMarker) map.removeLayer(userMarker);
+          userMarker = L.marker([lat, lng], {
+            icon: L.divIcon({
+              className: 'custom-user-icon',
+              html: `<div class="bg-blue-600 text-white rounded-full p-2 w-8 h-8 flex items-center justify-center shadow-lg border-2 border-white"><i class="fa-solid fa-location-crosshairs text-sm"></i></div>`
+            })
+          }).addTo(map).bindPopup('<b>Lokasi Anda Saat Ini</b>');
+        });
+      }
 
-            if (isNaN(lat) || isNaN(lng)) return;
+      // Load data manual dari Google Sheet
+      loadLocationsFromDb();
 
+      // Event Listener saat peta digeser/zoom -> ambil POI OSM
+      map.on('moveend', () => {
+        clearTimeout(osmDebounceTimer);
+        osmDebounceTimer = setTimeout(fetchOsmPoiInView, 600);
+      });
+
+      // Panggilan pertama untuk OSM POI
+      fetchOsmPoiInView();
+    }
+
+    // 1. Ambil POI dari Google Sheets DB
+    function loadLocationsFromDb() {
+      fetch(`${GAS_WEB_APP_URL}?action=getLocations`, { method: 'GET', redirect: 'follow' })
+        .then(res => res.json())
+        .then(res => {
+          if (res.status === 'success' && Array.isArray(res.data)) {
+            poiDbGroup.clearLayers();
+            
+            res.data.forEach(loc => {
+              const lat = parseFloat(loc.latitude);
+              const lng = parseFloat(loc.longitude);
+
+              if (isNaN(lat) || isNaN(lng)) return;
+
+              let color = 'bg-red-600';
+              let iconClass = 'fa-gas-pump';
+              
+              if (loc.kategori === 'Pertashop') color = 'bg-green-600';
+              if (loc.kategori === 'Eceran') color = 'bg-amber-500';
+              if (loc.kategori === 'SPKLU') {
+                color = 'bg-blue-600';
+                iconClass = 'fa-charging-station';
+              }
+
+              const icon = L.divIcon({
+                className: 'custom-poi-icon',
+                html: `<div class="${color} text-white rounded-full p-2 w-8 h-8 flex items-center justify-center shadow-md border border-white"><i class="fa-solid ${iconClass} text-xs"></i></div>`
+              });
+
+              const popupContent = `
+                <div class="p-1">
+                  <span class="text-[10px] font-bold px-2 py-0.5 rounded text-white ${color}">${loc.kategori}</span>
+                  <h4 class="font-bold text-sm mt-1 text-gray-800">${loc.nama_tempat}</h4>
+                  <p class="text-xs text-gray-600 mt-1"><b>Tersedia:</b> ${loc.jenis_bbm}</p>
+                  <p class="text-xs text-gray-500 mt-0.5"><b>Patokan:</b> ${loc.alamat_catatan}</p>
+                  <a href="https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}" target="_blank" 
+                     class="mt-2 block text-center bg-blue-600 text-white text-xs py-1 px-2 rounded font-semibold hover:bg-blue-700">
+                    <i class="fa-solid fa-route"></i> Navigasi Rute
+                  </a>
+                </div>
+              `;
+
+              L.marker([lat, lng], { icon: icon })
+                .bindPopup(popupContent)
+                .addTo(poiDbGroup);
+            });
+          }
+        })
+        .catch(err => console.error('Gagal memuat POI DB:', err));
+    }
+
+    // 2. Ambil POI Live dari OpenStreetMap Overpass API berdasarkan Viewport Screen
+    function fetchOsmPoiInView() {
+      // Batasi pemanggilan jika zoom terlalu jauh (luas) agar ringan
+      if (map.getZoom() < 12) return;
+
+      const loader = document.getElementById('osm-loader');
+      loader.classList.remove('hidden');
+
+      const bounds = map.getBounds();
+      const s = bounds.getSouth().toFixed(4);
+      const w = bounds.getWest().toFixed(4);
+      const n = bounds.getNorth().toFixed(4);
+      const e = bounds.getEast().toFixed(4);
+
+      const query = `
+        [out:json][timeout:15];
+        (
+          node["amenity"="fuel"](${s},${w},${n},${e});
+          node["amenity"="charging_station"](${s},${w},${n},${e});
+        );
+        out body;
+      `;
+
+      const url = "https://overpass-api.de/api/interpreter?data=" + encodeURIComponent(query);
+
+      fetch(url)
+        .then(res => res.json())
+        .then(data => {
+          loader.classList.add('hidden');
+
+          if (!data || !data.elements) return;
+
+          data.elements.forEach(el => {
+            if (loadedOsmIds.has(el.id)) return; // Lewati jika ID sudah pernah digambar
+            loadedOsmIds.add(el.id);
+
+            let rawName = (el.tags && el.tags.name) ? el.tags.name : '';
+            let isCharging = el.tags && el.tags.amenity === 'charging_station';
+
+            let kategori = 'SPBU';
             let color = 'bg-red-600';
-            if (loc.kategori === 'Pertashop') color = 'bg-green-600';
-            if (loc.kategori === 'Eceran') color = 'bg-amber-500';
+            let iconClass = 'fa-gas-pump';
+
+            if (isCharging) {
+              kategori = 'SPKLU';
+              color = 'bg-blue-600';
+              iconClass = 'fa-charging-station';
+              if (!rawName) rawName = 'SPKLU Charging Station';
+            } else if (rawName.toLowerCase().includes('pertashop')) {
+              kategori = 'Pertashop';
+              color = 'bg-green-600';
+            } else {
+              if (!rawName) rawName = 'SPBU / Penjual BBM';
+            }
 
             const icon = L.divIcon({
-              className: 'custom-poi-icon',
-              html: `<div class="${color} text-white rounded-full p-2 w-8 h-8 flex items-center justify-center shadow-md border border-white"><i class="fa-solid fa-gas-pump text-xs"></i></div>`
+              className: 'custom-osm-icon',
+              html: `<div class="${color} text-white rounded-full p-2 w-8 h-8 flex items-center justify-center shadow-md border border-white"><i class="fa-solid ${iconClass} text-xs"></i></div>`
             });
 
             const popupContent = `
               <div class="p-1">
-                <span class="text-[10px] font-bold px-2 py-0.5 rounded text-white ${color}">${loc.kategori}</span>
-                <h4 class="font-bold text-sm mt-1 text-gray-800">${loc.nama_tempat}</h4>
-                <p class="text-xs text-gray-600 mt-1"><b>BBM:</b> ${loc.jenis_bbm}</p>
-                <p class="text-xs text-gray-500 mt-0.5"><b>Patokan:</b> ${loc.alamat_catatan}</p>
-                <a href="https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}" target="_blank" 
+                <span class="text-[10px] font-bold px-2 py-0.5 rounded text-white ${color}">${kategori} (OSM)</span>
+                <h4 class="font-bold text-sm mt-1 text-gray-800">${rawName}</h4>
+                <p class="text-xs text-gray-500 mt-1">Sumber: OpenStreetMap Data</p>
+                <a href="https://www.google.com/maps/dir/?api=1&destination=${el.lat},${el.lon}" target="_blank" 
                    class="mt-2 block text-center bg-blue-600 text-white text-xs py-1 px-2 rounded font-semibold hover:bg-blue-700">
                   <i class="fa-solid fa-route"></i> Navigasi Rute
                 </a>
               </div>
             `;
 
-            L.marker([lat, lng], { icon: icon })
+            L.marker([el.lat, el.lon], { icon: icon })
               .bindPopup(popupContent)
-              .addTo(poiMarkersGroup);
+              .addTo(poiOsmGroup);
           });
-        }
-      })
-      .catch(err => console.error('Gagal memuat POI:', err));
-  }
-
-  function initPickerMap() {
-    if (pickerMap) {
-      pickerMap.invalidateSize();
-      return;
+        })
+        .catch(err => {
+          loader.classList.add('hidden');
+          console.log('Gagal menarik POI OSM:', err);
+        });
     }
 
-    const center = map.getCenter();
-    pickerMap = L.map('picker-map').setView([center.lat, center.lng], 14);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(pickerMap);
-
-    pickerMarker = L.marker([center.lat, center.lng], { draggable: true }).addTo(pickerMap);
-
-    document.getElementById('add-lat').value = center.lat.toFixed(6);
-    document.getElementById('add-lng').value = center.lng.toFixed(6);
-
-    pickerMarker.on('dragend', function () {
-      const coord = pickerMarker.getLatLng();
-      document.getElementById('add-lat').value = coord.lat.toFixed(6);
-      document.getElementById('add-lng').value = coord.lng.toFixed(6);
-    });
-
-    pickerMap.on('click', function(e) {
-      pickerMarker.setLatLng(e.latlng);
-      document.getElementById('add-lat').value = e.latlng.lat.toFixed(6);
-      document.getElementById('add-lng').value = e.latlng.lng.toFixed(6);
-    });
-  }
-
-  function switchTab(tab) {
-    document.getElementById('view-map').classList.add('hidden');
-    document.getElementById('view-add').classList.add('hidden');
-    document.getElementById('view-auth').classList.add('hidden');
-
-    document.getElementById('nav-map').className = "flex flex-col items-center text-gray-500";
-    document.getElementById('nav-add').className = "flex flex-col items-center text-gray-500";
-    document.getElementById('nav-auth').className = "flex flex-col items-center text-gray-500";
-
-    if (tab === 'map') {
-      document.getElementById('view-map').classList.remove('hidden');
-      document.getElementById('nav-map').className = "flex flex-col items-center text-red-600";
-      setTimeout(() => map.invalidateSize(), 100);
-    } else if (tab === 'add') {
-      if (!currentUser) {
-        alert('Anda harus login terlebih dahulu untuk menambah lokasi!');
-        switchTab('auth');
+    function initPickerMap() {
+      if (pickerMap) {
+        pickerMap.invalidateSize();
         return;
       }
-      document.getElementById('view-add').classList.remove('hidden');
-      document.getElementById('nav-add').className = "flex flex-col items-center text-red-600";
-      setTimeout(initPickerMap, 200);
-    } else if (tab === 'auth') {
-      document.getElementById('view-auth').classList.remove('hidden');
-      document.getElementById('nav-auth').className = "flex flex-col items-center text-red-600";
+
+      const center = map.getCenter();
+      pickerMap = L.map('picker-map').setView([center.lat, center.lng], 14);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(pickerMap);
+
+      pickerMarker = L.marker([center.lat, center.lng], { draggable: true }).addTo(pickerMap);
+
+      document.getElementById('add-lat').value = center.lat.toFixed(6);
+      document.getElementById('add-lng').value = center.lng.toFixed(6);
+
+      pickerMarker.on('dragend', function () {
+        const coord = pickerMarker.getLatLng();
+        document.getElementById('add-lat').value = coord.lat.toFixed(6);
+        document.getElementById('add-lng').value = coord.lng.toFixed(6);
+      });
+
+      pickerMap.on('click', function(e) {
+        pickerMarker.setLatLng(e.latlng);
+        document.getElementById('add-lat').value = e.latlng.lat.toFixed(6);
+        document.getElementById('add-lng').value = e.latlng.lng.toFixed(6);
+      });
     }
-  }
 
-  function toggleAuthMode(mode) {
-    if (mode === 'register') {
-      document.getElementById('form-login-box').classList.add('hidden');
-      document.getElementById('form-register-box').classList.remove('hidden');
-    } else {
-      document.getElementById('form-login-box').classList.remove('hidden');
-      document.getElementById('form-register-box').classList.add('hidden');
-    }
-  }
+    function switchTab(tab) {
+      document.getElementById('view-map').classList.add('hidden');
+      document.getElementById('view-add').classList.add('hidden');
+      document.getElementById('view-auth').classList.add('hidden');
 
-  function updateUserUI() {
-    const statusBar = document.getElementById('user-status-bar');
-    if (currentUser) {
-      statusBar.innerHTML = `<i class="fa-solid fa-user-check"></i> ${currentUser.username} (${currentUser.status})`;
-      document.getElementById('auth-forms').classList.add('hidden');
-      document.getElementById('auth-logged-in').classList.remove('hidden');
-      document.getElementById('logged-user-name').innerText = currentUser.nama_lengkap;
-      document.getElementById('logged-user-status').innerText = `Status Akun: ${currentUser.status}`;
-    } else {
-      statusBar.innerHTML = `<i class="fa-solid fa-user-slash"></i> Guest`;
-      document.getElementById('auth-forms').classList.remove('hidden');
-      document.getElementById('auth-logged-in').classList.add('hidden');
-    }
-  }
+      document.getElementById('nav-map').className = "flex flex-col items-center text-gray-500";
+      document.getElementById('nav-add').className = "flex flex-col items-center text-gray-500";
+      document.getElementById('nav-auth').className = "flex flex-col items-center text-gray-500";
 
-  function logout() {
-    localStorage.removeItem('ada_bengsin_user');
-    currentUser = null;
-    updateUserUI();
-    switchTab('map');
-  }
-
-  // Helper Fungsi POST ke Google Apps Script (Anti CORS Block)
-  function sendGasPost(payload) {
-    return fetch(GAS_WEB_APP_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(payload)
-    }).then(res => res.json());
-  }
-
-  document.getElementById('form-register').addEventListener('submit', e => {
-    e.preventDefault();
-    const payload = {
-      action: 'register',
-      data: {
-        nama_lengkap: document.getElementById('reg-nama').value,
-        username: document.getElementById('reg-username').value,
-        no_whatsapp: document.getElementById('reg-wa').value,
-        password: document.getElementById('reg-password').value
+      if (tab === 'map') {
+        document.getElementById('view-map').classList.remove('hidden');
+        document.getElementById('nav-map').className = "flex flex-col items-center text-red-600";
+        setTimeout(() => map.invalidateSize(), 100);
+      } else if (tab === 'add') {
+        if (!currentUser) {
+          alert('Anda harus login terlebih dahulu untuk menambah lokasi!');
+          switchTab('auth');
+          return;
+        }
+        document.getElementById('view-add').classList.remove('hidden');
+        document.getElementById('nav-add').className = "flex flex-col items-center text-red-600";
+        setTimeout(initPickerMap, 200);
+      } else if (tab === 'auth') {
+        document.getElementById('view-auth').classList.remove('hidden');
+        document.getElementById('nav-auth').className = "flex flex-col items-center text-red-600";
       }
-    };
+    }
 
-    sendGasPost(payload)
-      .then(res => {
-        alert(res.message);
-        if (res.status === 'success') toggleAuthMode('login');
-      })
-      .catch(err => alert('Gagal mendaftar: ' + err));
-  });
-
-  document.getElementById('form-login').addEventListener('submit', e => {
-    e.preventDefault();
-    const payload = {
-      action: 'login',
-      data: {
-        username: document.getElementById('login-username').value,
-        password: document.getElementById('login-password').value
+    function toggleAuthMode(mode) {
+      if (mode === 'register') {
+        document.getElementById('form-login-box').classList.add('hidden');
+        document.getElementById('form-register-box').classList.remove('hidden');
+      } else {
+        document.getElementById('form-login-box').classList.remove('hidden');
+        document.getElementById('form-register-box').classList.add('hidden');
       }
-    };
+    }
 
-    sendGasPost(payload)
-      .then(res => {
-        if (res.status === 'success') {
-          currentUser = res.user;
-          localStorage.setItem('ada_bengsin_user', JSON.stringify(currentUser));
-          updateUserUI();
-          switchTab('map');
-        } else {
+    function updateUserUI() {
+      const statusBar = document.getElementById('user-status-bar');
+      if (currentUser) {
+        statusBar.innerHTML = `<i class="fa-solid fa-user-check"></i> ${currentUser.username} (${currentUser.status})`;
+        document.getElementById('auth-forms').classList.add('hidden');
+        document.getElementById('auth-logged-in').classList.remove('hidden');
+        document.getElementById('logged-user-name').innerText = currentUser.nama_lengkap;
+        document.getElementById('logged-user-status').innerText = `Status Akun: ${currentUser.status}`;
+      } else {
+        statusBar.innerHTML = `<i class="fa-solid fa-user-slash"></i> Guest`;
+        document.getElementById('auth-forms').classList.remove('hidden');
+        document.getElementById('auth-logged-in').classList.add('hidden');
+      }
+    }
+
+    function logout() {
+      localStorage.removeItem('ada_bengsin_user');
+      currentUser = null;
+      updateUserUI();
+      switchTab('map');
+    }
+
+    // Helper POST ke Google Apps Script (Anti CORS Block)
+    function sendGasPost(payload) {
+      return fetch(GAS_WEB_APP_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(payload)
+      }).then(res => res.json());
+    }
+
+    document.getElementById('form-register').addEventListener('submit', e => {
+      e.preventDefault();
+      const payload = {
+        action: 'register',
+        data: {
+          nama_lengkap: document.getElementById('reg-nama').value,
+          username: document.getElementById('reg-username').value,
+          no_whatsapp: document.getElementById('reg-wa').value,
+          password: document.getElementById('reg-password').value
+        }
+      };
+
+      sendGasPost(payload)
+        .then(res => {
           alert(res.message);
-        }
-      })
-      .catch(err => alert('Gagal login: ' + err));
-  });
+          if (res.status === 'success') toggleAuthMode('login');
+        })
+        .catch(err => alert('Gagal mendaftar: ' + err));
+    });
 
-  document.getElementById('form-add-location').addEventListener('submit', e => {
-    e.preventDefault();
-    const payload = {
-      action: 'addLocation',
-      data: {
-        username: currentUser.username,
-        latitude: document.getElementById('add-lat').value,
-        longitude: document.getElementById('add-lng').value,
-        nama_tempat: document.getElementById('add-nama').value,
-        kategori: document.getElementById('add-kategori').value,
-        jenis_bbm: document.getElementById('add-bbm').value,
-        alamat_catatan: document.getElementById('add-catatan').value
-      }
-    };
-
-    sendGasPost(payload)
-      .then(res => {
-        alert(res.message);
-        if (res.status === 'success') {
-          switchTab('map');
-          loadLocations();
+    document.getElementById('form-login').addEventListener('submit', e => {
+      e.preventDefault();
+      const payload = {
+        action: 'login',
+        data: {
+          username: document.getElementById('login-username').value,
+          password: document.getElementById('login-password').value
         }
-      })
-      .catch(err => alert('Gagal menambah lokasi: ' + err));
-  });
-</script>
+      };
+
+      sendGasPost(payload)
+        .then(res => {
+          if (res.status === 'success') {
+            currentUser = res.user;
+            localStorage.setItem('ada_bengsin_user', JSON.stringify(currentUser));
+            updateUserUI();
+            switchTab('map');
+          } else {
+            alert(res.message);
+          }
+        })
+        .catch(err => alert('Gagal login: ' + err));
+    });
+
+    document.getElementById('form-add-location').addEventListener('submit', e => {
+      e.preventDefault();
+      const payload = {
+        action: 'addLocation',
+        data: {
+          username: currentUser.username,
+          latitude: document.getElementById('add-lat').value,
+          longitude: document.getElementById('add-lng').value,
+          nama_tempat: document.getElementById('add-nama').value,
+          kategori: document.getElementById('add-kategori').value,
+          jenis_bbm: document.getElementById('add-bbm').value,
+          alamat_catatan: document.getElementById('add-catatan').value
+        }
+      };
+
+      sendGasPost(payload)
+        .then(res => {
+          alert(res.message);
+          if (res.status === 'success') {
+            switchTab('map');
+            loadLocationsFromDb();
+          }
+        })
+        .catch(err => alert('Gagal menambah lokasi: ' + err));
+    });
+  </script>
 </body>
 </html>
